@@ -25,38 +25,49 @@ namespace VocaFlowAI.Desktop
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            _appDir = AppDomain.CurrentDomain.BaseDirectory;
-            _backendDir = ResolveBackendDir();
-
-            // 1. Assign to Windows Job Object for bulletproof child-process termination
-            EnableJobKillOnClose();
-
-            // 2. Initialize System Tray
-            SetupTrayIcon();
-
-            // 3. Start Backend Process in Background
-            bool started = StartBackendServer();
-            if (!started)
+            bool createdNew;
+            using (Mutex mutex = new Mutex(true, "VocaFlowAI_SingleInstance_App_Mutex", out createdNew))
             {
-                MessageBox.Show("Could not start VocaFlow AI backend server. Please verify Python is installed.",
-                    "VocaFlow AI Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                Cleanup();
-                return;
+                if (!createdNew)
+                {
+                    // Backend already running! Focus app window and terminate duplicate launcher process
+                    LaunchAppWindow();
+                    return;
+                }
+
+                _appDir = AppDomain.CurrentDomain.BaseDirectory;
+                _backendDir = ResolveBackendDir();
+
+                // 1. Assign to Windows Job Object for bulletproof child-process termination
+                EnableJobKillOnClose();
+
+                // 2. Initialize System Tray
+                SetupTrayIcon();
+
+                // 3. Start Backend Process in Background
+                bool started = StartBackendServer();
+                if (!started)
+                {
+                    MessageBox.Show("Could not start VocaFlow AI backend server. Please verify Python is installed.",
+                        "VocaFlow AI Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Cleanup();
+                    return;
+                }
+
+                // 4. Wait for server to be healthy
+                bool ready = WaitForServerReady(30);
+                if (!ready)
+                {
+                    MessageBox.Show("VocaFlow AI backend did not respond in time on port " + Port,
+                        "VocaFlow AI Timeout", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+
+                // 5. Launch Standalone Native Window (Edge/Chrome App Mode)
+                LaunchAppWindow();
+
+                // 6. Run message loop
+                Application.Run();
             }
-
-            // 4. Wait for server to be healthy
-            bool ready = WaitForServerReady(30);
-            if (!ready)
-            {
-                MessageBox.Show("VocaFlow AI backend did not respond in time on port " + Port,
-                    "VocaFlow AI Timeout", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-
-            // 5. Launch Standalone Native Window (Edge/Chrome App Mode)
-            LaunchAppWindow();
-
-            // 6. Run message loop
-            Application.Run();
         }
 
         private static string ResolveBackendDir()
@@ -232,6 +243,11 @@ namespace VocaFlowAI.Desktop
 
             try
             {
+                string configDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VocaFlow-AI");
+                Directory.CreateDirectory(configDir);
+                string logPath = Path.Combine(configDir, "backend.log");
+                try { File.WriteAllText(logPath, "=== VocaFlow AI Backend Starting: " + DateTime.Now.ToString("s") + " ===\r\n"); } catch { }
+
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = pythonExe,
@@ -239,6 +255,8 @@ namespace VocaFlowAI.Desktop
                     WorkingDirectory = _backendDir,
                     UseShellExecute = false,
                     CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
 
@@ -246,13 +264,33 @@ namespace VocaFlowAI.Desktop
                 psi.EnvironmentVariables["PYTHONPATH"] = _backendDir;
                 psi.EnvironmentVariables["PORT"] = Port.ToString();
 
-                _backendProcess = Process.Start(psi);
-                if (_backendProcess != null && _jobHandle != IntPtr.Zero)
+                _backendProcess = new Process();
+                _backendProcess.StartInfo = psi;
+                _backendProcess.OutputDataReceived += (s, e) =>
+                {
+                    if (!string.IsNullOrEmpty(e.Data))
+                    {
+                        try { File.AppendAllText(logPath, "[OUT] " + e.Data + "\r\n"); } catch { }
+                    }
+                };
+                _backendProcess.ErrorDataReceived += (s, e) =>
+                {
+                    if (!string.IsNullOrEmpty(e.Data))
+                    {
+                        try { File.AppendAllText(logPath, "[ERR] " + e.Data + "\r\n"); } catch { }
+                    }
+                };
+
+                _backendProcess.Start();
+                _backendProcess.BeginOutputReadLine();
+                _backendProcess.BeginErrorReadLine();
+
+                if (_jobHandle != IntPtr.Zero)
                 {
                     AssignProcessToJobObject(_jobHandle, _backendProcess.Handle);
                 }
 
-                return _backendProcess != null;
+                return true;
             }
             catch (Exception ex)
             {
@@ -319,31 +357,59 @@ namespace VocaFlowAI.Desktop
 
             if (browserExe != null)
             {
+                string userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VocaFlow-AI", "browser-data");
+                try { Directory.CreateDirectory(userDataDir); } catch { }
+
                 string args = string.Format(
-                    "--app={0} --window-size=1440,900 --enable-media-stream --autoplay-policy=no-user-gesture-required",
-                    url);
+                    "--app={0} --user-data-dir=\"{1}\" --no-first-run --no-default-browser-check --window-size=1440,900 --enable-media-stream --autoplay-policy=no-user-gesture-required",
+                    url, userDataDir);
 
-                _browserProcess = Process.Start(new ProcessStartInfo
+                try
                 {
-                    FileName = browserExe,
-                    Arguments = args,
-                    UseShellExecute = true
-                });
-
-                // Monitor browser process; exit app when main window closes
-                new Thread(() =>
-                {
-                    try
+                    _browserProcess = Process.Start(new ProcessStartInfo
                     {
-                        if (_browserProcess != null)
+                        FileName = browserExe,
+                        Arguments = args,
+                        UseShellExecute = false
+                    });
+
+                    // Monitor browser process lifecycle
+                    new Thread(() =>
+                    {
+                        try
                         {
-                            _browserProcess.WaitForExit();
-                            // Window was closed by user
-                            Application.Exit();
+                            if (_browserProcess != null)
+                            {
+                                DateTime launchTime = DateTime.UtcNow;
+                                _browserProcess.WaitForExit();
+                                TimeSpan duration = DateTime.UtcNow - launchTime;
+
+                                // If the browser process stayed open for >= 5 seconds before exiting,
+                                // the user actively used and intentionally closed the app window.
+                                // In that case, cleanly shut down the entire application.
+                                if (duration.TotalSeconds >= 5)
+                                {
+                                    Application.Exit();
+                                }
+                                else
+                                {
+                                    // Edge/Chrome delegated window creation to an existing browser instance.
+                                    // CRITICAL: DO NOT kill the backend or exit!
+                                    // The app window is actively displaying on screen.
+                                    if (_trayIcon != null)
+                                    {
+                                        _trayIcon.ShowBalloonTip(3000, "VocaFlow AI", "VocaFlow AI is active and running.", ToolTipIcon.Info);
+                                    }
+                                }
+                            }
                         }
-                    }
-                    catch { }
-                }) { IsBackground = true }.Start();
+                        catch { }
+                    }) { IsBackground = true }.Start();
+                }
+                catch
+                {
+                    Process.Start(url);
+                }
             }
             else
             {
@@ -372,11 +438,30 @@ namespace VocaFlowAI.Desktop
                 _trayIcon.Icon = SystemIcons.Application;
             }
 
+            string logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VocaFlow-AI", "backend.log");
+
             ContextMenu menu = new ContextMenu();
             menu.MenuItems.Add("🎵 Open VocaFlow AI", (s, e) => LaunchAppWindow());
             menu.MenuItems.Add("🌐 Open in Web Browser", (s, e) => Process.Start("http://127.0.0.1:" + Port));
             menu.MenuItems.Add("-");
             menu.MenuItems.Add("🟢 Engine Status: Active (Port " + Port + ")");
+            menu.MenuItems.Add("📄 View Backend Logs", (s, e) => {
+                try
+                {
+                    if (File.Exists(logPath)) Process.Start("notepad.exe", logPath);
+                    else MessageBox.Show("Log file has not been created yet.", "VocaFlow AI");
+                }
+                catch { }
+            });
+            menu.MenuItems.Add("📁 Open Audio Library Folder", (s, e) => {
+                try
+                {
+                    string audioDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VocaFlow-AI", "local_storage", "audio");
+                    if (!Directory.Exists(audioDir)) Directory.CreateDirectory(audioDir);
+                    Process.Start("explorer.exe", audioDir);
+                }
+                catch { }
+            });
             menu.MenuItems.Add("🔄 Restart Backend Engine", (s, e) => RestartBackend());
             menu.MenuItems.Add("-");
             menu.MenuItems.Add("❌ Exit VocaFlow AI", (s, e) => CleanupAndExit());

@@ -197,12 +197,48 @@ namespace VocaFlowAI.Installer
             Directory.CreateDirectory(targetDir);
 
             string sourceRoot = AppDomain.CurrentDomain.BaseDirectory;
-            if (!Directory.Exists(Path.Combine(sourceRoot, "backend")))
+
+            // Resolve backend source
+            string backendSource = null;
+            string[] backendCandidates = new string[]
             {
-                string parent = Path.GetFullPath(Path.Combine(sourceRoot, ".."));
-                if (Directory.Exists(Path.Combine(parent, "backend")))
+                Path.Combine(sourceRoot, "backend"),
+                Path.Combine(sourceRoot, "vocaflow-ai", "backend"),
+                Path.Combine(sourceRoot, "..", "backend"),
+                Path.Combine(sourceRoot, "..", "vocaflow-ai", "backend"),
+                Path.Combine(sourceRoot, @"..\..\backend"),
+                Path.Combine(sourceRoot, @"..\..\vocaflow-ai\backend"),
+                @"c:\spotify_music_remover\vocaflow-ai\backend",
+                @"c:\spotify_music_remover\backend"
+            };
+            foreach (var cand in backendCandidates)
+            {
+                if (Directory.Exists(cand) && File.Exists(Path.Combine(cand, "app", "main.py")))
                 {
-                    sourceRoot = parent;
+                    backendSource = Path.GetFullPath(cand);
+                    break;
+                }
+            }
+
+            // Resolve frontend dist source
+            string distSource = null;
+            string[] distCandidates = new string[]
+            {
+                Path.Combine(sourceRoot, "frontend", "dist"),
+                Path.Combine(sourceRoot, "vocaflow-ai", "frontend", "dist"),
+                Path.Combine(sourceRoot, "..", "frontend", "dist"),
+                Path.Combine(sourceRoot, "..", "vocaflow-ai", "frontend", "dist"),
+                Path.Combine(sourceRoot, @"..\..\frontend\dist"),
+                Path.Combine(sourceRoot, @"..\..\vocaflow-ai\frontend\dist"),
+                @"c:\spotify_music_remover\vocaflow-ai\frontend\dist",
+                @"c:\spotify_music_remover\frontend\dist"
+            };
+            foreach (var cand in distCandidates)
+            {
+                if (Directory.Exists(cand) && File.Exists(Path.Combine(cand, "index.html")))
+                {
+                    distSource = Path.GetFullPath(cand);
+                    break;
                 }
             }
 
@@ -211,6 +247,10 @@ namespace VocaFlowAI.Installer
             // 1. Copy VocaFlow-AI.exe
             string mainExeSource = Path.Combine(sourceRoot, "bin", "VocaFlow-AI.exe");
             if (!File.Exists(mainExeSource)) mainExeSource = Path.Combine(sourceRoot, "VocaFlow-AI.exe");
+            if (!File.Exists(mainExeSource)) mainExeSource = Path.Combine(sourceRoot, "desktop", "bin", "VocaFlow-AI.exe");
+            if (!File.Exists(mainExeSource)) mainExeSource = @"c:\spotify_music_remover\vocaflow-ai\desktop\bin\VocaFlow-AI.exe";
+            if (!File.Exists(mainExeSource)) mainExeSource = @"c:\spotify_music_remover\VocaFlow-AI.exe";
+
             string destExe = Path.Combine(targetDir, "VocaFlow-AI.exe");
             if (File.Exists(mainExeSource))
             {
@@ -219,6 +259,9 @@ namespace VocaFlowAI.Installer
 
             // 2. Copy desktop app.ico
             string icoSource = Path.Combine(sourceRoot, "desktop", "app.ico");
+            if (!File.Exists(icoSource)) icoSource = Path.Combine(sourceRoot, "app.ico");
+            if (!File.Exists(icoSource)) icoSource = @"c:\spotify_music_remover\vocaflow-ai\desktop\app.ico";
+
             if (File.Exists(icoSource))
             {
                 Directory.CreateDirectory(Path.Combine(targetDir, "desktop"));
@@ -227,17 +270,18 @@ namespace VocaFlowAI.Installer
 
             // 3. Copy backend folder
             if (progress != null) progress(45, "Installing Python AI backend modules...");
-            string backendSource = Path.Combine(sourceRoot, "backend");
             string backendDest = Path.Combine(targetDir, "backend");
-            CopyDirectory(backendSource, backendDest, new string[] { "__pycache__", ".pytest_cache" });
+            if (!string.IsNullOrEmpty(backendSource) && Directory.Exists(backendSource))
+            {
+                CopyDirectory(backendSource, backendDest, new string[] { "__pycache__", ".pytest_cache" });
+            }
 
             // 4. Copy frontend/dist folder
             if (progress != null) progress(70, "Installing optimized frontend UI bundle...");
-            string frontendDistSource = Path.Combine(sourceRoot, "frontend", "dist");
             string frontendDistDest = Path.Combine(targetDir, "frontend", "dist");
-            if (Directory.Exists(frontendDistSource))
+            if (!string.IsNullOrEmpty(distSource) && Directory.Exists(distSource))
             {
-                CopyDirectory(frontendDistSource, frontendDistDest, new string[0]);
+                CopyDirectory(distSource, frontendDistDest, new string[0]);
             }
 
             // 5. Ensure local_storage structure exists
@@ -247,6 +291,13 @@ namespace VocaFlowAI.Installer
             {
                 Directory.CreateDirectory(Path.Combine(targetDir, "local_storage", s));
             }
+
+            // 6. Write backend_dir.txt
+            try
+            {
+                File.WriteAllText(Path.Combine(targetDir, "backend_dir.txt"), backendDest);
+            }
+            catch { }
 
             // 6. Create Shortcuts
             if (progress != null) progress(95, "Creating desktop and start menu shortcuts...");

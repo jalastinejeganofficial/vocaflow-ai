@@ -2,6 +2,12 @@ import { Track, LyricsData, SeparationStatus, EvaluationReport, AppSettings } fr
 
 export const getApiBase = (): string => {
   if (typeof window === 'undefined') return '/api';
+
+  // Direct desktop application or localhost backend hosting
+  if ((window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') && window.location.port === '8000') {
+    return '/api';
+  }
+
   const custom = localStorage.getItem('vocaflow_api_host');
   if (custom) return `${custom.replace(/\/$/, '')}/api`;
   const envApiUrl = (import.meta as any).env?.VITE_API_URL;
@@ -37,7 +43,16 @@ export const api = {
       method: 'POST',
       body: formData,
     });
-    if (!res.ok) throw new Error('Audio upload failed');
+    if (!res.ok) {
+      let detail = 'Audio upload failed';
+      try {
+        const errJson = await res.json();
+        if (errJson && errJson.detail) {
+          detail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+        }
+      } catch {}
+      throw new Error(detail);
+    }
     return res.json();
   },
 
