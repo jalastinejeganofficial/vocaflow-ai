@@ -61,34 +61,101 @@ namespace VocaFlowAI.Desktop
 
         private static string ResolveBackendDir()
         {
-            // Check direct subfolder or sibling folder
+            // 1. Check saved backend path if any
+            string configDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VocaFlow-AI");
+            string configFile = Path.Combine(configDir, "backend_dir.txt");
+            if (File.Exists(configFile))
+            {
+                try
+                {
+                    string saved = File.ReadAllText(configFile).Trim();
+                    if (Directory.Exists(saved) && File.Exists(Path.Combine(saved, "app", "main.py")))
+                    {
+                        return Path.GetFullPath(saved);
+                    }
+                }
+                catch { }
+            }
+
+            // 2. Check candidate directories
             string[] candidates = new string[]
             {
                 Path.Combine(_appDir, "backend"),
+                Path.Combine(_appDir, "vocaflow-ai", "backend"),
                 Path.Combine(_appDir, "..", "backend"),
+                Path.Combine(_appDir, "..", "vocaflow-ai", "backend"),
                 Path.Combine(_appDir, @"..\..\backend"),
-                _appDir
+                Path.Combine(_appDir, @"..\..\vocaflow-ai\backend"),
+                _appDir,
+                Path.Combine(Directory.GetCurrentDirectory(), "backend"),
+                Path.Combine(Directory.GetCurrentDirectory(), "vocaflow-ai", "backend"),
+                @"c:\spotify_music_remover\vocaflow-ai\backend",
+                @"c:\spotify_music_remover\backend",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VocaFlow-AI", "backend")
             };
 
             foreach (var path in candidates)
             {
-                string full = Path.GetFullPath(path);
-                if (File.Exists(Path.Combine(full, "app", "main.py")))
+                try
                 {
-                    return full;
+                    string full = Path.GetFullPath(path);
+                    if (Directory.Exists(full) && File.Exists(Path.Combine(full, "app", "main.py")))
+                    {
+                        SaveBackendDir(full);
+                        return full;
+                    }
+                }
+                catch { }
+            }
+
+            // 3. Fallback: ask user to select backend folder
+            using (FolderBrowserDialog fbd = new FolderBrowserDialog())
+            {
+                fbd.Description = "VocaFlow AI: Please select the 'backend' folder (or 'vocaflow-ai' root folder):";
+                fbd.SelectedPath = _appDir;
+                if (fbd.ShowDialog() == DialogResult.OK)
+                {
+                    string sel = fbd.SelectedPath;
+                    if (File.Exists(Path.Combine(sel, "app", "main.py")))
+                    {
+                        SaveBackendDir(sel);
+                        return Path.GetFullPath(sel);
+                    }
+                    string sub = Path.Combine(sel, "backend");
+                    if (File.Exists(Path.Combine(sub, "app", "main.py")))
+                    {
+                        SaveBackendDir(sub);
+                        return Path.GetFullPath(sub);
+                    }
                 }
             }
+
             return Path.GetFullPath(Path.Combine(_appDir, "backend"));
+        }
+
+        private static void SaveBackendDir(string dir)
+        {
+            try
+            {
+                string configDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VocaFlow-AI");
+                Directory.CreateDirectory(configDir);
+                File.WriteAllText(Path.Combine(configDir, "backend_dir.txt"), dir);
+            }
+            catch { }
         }
 
         private static string FindPythonExecutable()
         {
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            // Priority 1: Virtualenvs inside backend or project
             string[] venvPaths = new string[]
             {
                 Path.Combine(_backendDir, ".venv", "Scripts", "python.exe"),
                 Path.Combine(_backendDir, "venv", "Scripts", "python.exe"),
                 Path.Combine(_backendDir, "..", ".venv", "Scripts", "python.exe"),
-                Path.Combine(_appDir, "python", "python.exe")
+                Path.Combine(_appDir, "python", "python.exe"),
+                Path.Combine(_appDir, "..", "python", "python.exe")
             };
 
             foreach (var vp in venvPaths)
@@ -96,12 +163,43 @@ namespace VocaFlowAI.Desktop
                 if (File.Exists(vp)) return Path.GetFullPath(vp);
             }
 
-            // Check PATH for python.exe
+            // Priority 2: Anaconda or standard Python installations
+            string[] standardInstallations = new string[]
+            {
+                Path.Combine(userProfile, @"anaconda3\python.exe"),
+                Path.Combine(userProfile, @"AppData\Local\Programs\Python\Python314\python.exe"),
+                Path.Combine(userProfile, @"AppData\Local\Programs\Python\Python313\python.exe"),
+                Path.Combine(userProfile, @"AppData\Local\Programs\Python\Python312\python.exe"),
+                Path.Combine(userProfile, @"AppData\Local\Programs\Python\Python311\python.exe"),
+                @"C:\Program Files\Python314\python.exe",
+                @"C:\Program Files\Python313\python.exe",
+                @"C:\Program Files\Python312\python.exe",
+                @"C:\Program Files\Python311\python.exe"
+            };
+
+            foreach (var sp in standardInstallations)
+            {
+                if (File.Exists(sp)) return sp;
+            }
+
+            // Priority 3: Search PATH (ignore 0-byte WindowsApps stubs)
             string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
             foreach (var p in pathEnv.Split(';'))
             {
-                string candidate = Path.Combine(p.Trim(), "python.exe");
-                if (File.Exists(candidate)) return candidate;
+                string dir = p.Trim();
+                if (string.IsNullOrEmpty(dir) || dir.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) >= 0)
+                    continue;
+
+                string candidate = Path.Combine(dir, "python.exe");
+                if (File.Exists(candidate))
+                {
+                    try
+                    {
+                        FileInfo fi = new FileInfo(candidate);
+                        if (fi.Length > 1024) return candidate;
+                    }
+                    catch { }
+                }
             }
 
             return "python.exe";
@@ -109,10 +207,31 @@ namespace VocaFlowAI.Desktop
 
         private static bool StartBackendServer()
         {
+            string pythonExe = FindPythonExecutable();
+
+            // Validate that backend directory exists
+            if (!Directory.Exists(_backendDir))
+            {
+                MessageBox.Show(
+                    "Backend directory does not exist:\n\n" + _backendDir +
+                    "\n\nPlease ensure VocaFlow AI files are intact or run VocaFlow-AI-Setup.exe.",
+                    "VocaFlow AI Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
+            // Validate that main.py exists
+            string mainPy = Path.Combine(_backendDir, "app", "main.py");
+            if (!File.Exists(mainPy))
+            {
+                MessageBox.Show(
+                    "Backend main.py not found at:\n\n" + mainPy +
+                    "\n\nPlease check your VocaFlow AI folder.",
+                    "VocaFlow AI Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
             try
             {
-                string pythonExe = FindPythonExecutable();
-
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = pythonExe,
@@ -137,7 +256,11 @@ namespace VocaFlowAI.Desktop
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error launching backend: " + ex.Message, "VocaFlow AI", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(
+                    "Error launching backend: " + ex.Message + "\n\n" +
+                    "Python: " + pythonExe + "\n" +
+                    "Working Directory: " + _backendDir,
+                    "VocaFlow AI Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return false;
             }
         }
@@ -376,3 +499,4 @@ namespace VocaFlowAI.Desktop
         #endregion
     }
 }
+
