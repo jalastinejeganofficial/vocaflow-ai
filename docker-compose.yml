@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vocaflow_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./local_storage:/app/local_storage
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - KMP_DUPLICATE_LIB_OK=TRUE
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vocaflow_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+

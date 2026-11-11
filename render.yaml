@@ -1,0 +1,30 @@
+services:
+  # 1. VocaFlow AI Backend Service (FastAPI + PyTorch + Demucs + FFmpeg)
+  - type: web
+    name: vocaflow-backend
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    healthCheckPath: /api/health
+    plan: starter # Recommended (2 GB RAM) for AI neural Demucs stem separation
+    envVars:
+      - key: KMP_DUPLICATE_LIB_OK
+        value: "TRUE"
+    disk:
+      name: vocaflow-storage
+      mountPath: /app/local_storage
+      sizeGB: 10
+
+  # 2. VocaFlow AI Frontend (React + Vite SPA)
+  - type: web
+    name: vocaflow-frontend
+    runtime: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: vocaflow-backend
+          property: host
+
