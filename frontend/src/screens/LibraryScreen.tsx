@@ -11,10 +11,10 @@ import {
 } from 'lucide-react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { useIsMobile } from '../hooks/useIsMobile';
-import { api } from '../services/api';
+import { api, getApiBase } from '../services/api';
 
 export const LibraryScreen: React.FC = () => {
-  const { tracks, currentTrack, playTrack, loadLibrary } = usePlayerStore();
+  const { tracks, currentTrack, isPlaying, selectTrack, playTrack, loadLibrary } = usePlayerStore();
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'ready' | 'favorites'>('all');
   const [isUploading, setIsUploading] = useState(false);
@@ -26,10 +26,20 @@ export const LibraryScreen: React.FC = () => {
 
     setIsUploading(true);
     try {
+      let lastUploaded: any = null;
       for (let i = 0; i < files.length; i++) {
-        await api.uploadAudio(files[i]);
+        lastUploaded = await api.uploadAudio(files[i]);
       }
       await loadLibrary();
+
+      // If nothing is currently playing, select & preload the newly uploaded track
+      if (lastUploaded && !isPlaying) {
+        const latestTracks = usePlayerStore.getState().tracks;
+        const match = latestTracks.find((t) => t.id === lastUploaded.id) || latestTracks[0];
+        if (match) {
+          await selectTrack(match, false);
+        }
+      }
     } catch (err: any) {
       alert(`Upload failed: ${err.message}`);
     } finally {
@@ -47,7 +57,7 @@ export const LibraryScreen: React.FC = () => {
   const handleDelete = async (trackId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (confirm('Delete this track from your library?')) {
-      await fetch(`/api/library/${trackId}`, { method: 'DELETE' });
+      await fetch(`${getApiBase()}/library/${trackId}`, { method: 'DELETE' });
       await loadLibrary();
     }
   };

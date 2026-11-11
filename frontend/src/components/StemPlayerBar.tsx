@@ -45,13 +45,14 @@ export const StemPlayerBar: React.FC = () => {
   if (!currentTrack) return null;
 
   const formatTime = (secs: number) => {
-    if (isNaN(secs) || secs < 0) return '0:00';
+    if (!Number.isFinite(secs) || isNaN(secs) || secs < 0) return '0:00';
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const effectiveDuration = duration || currentTrack.duration || 0;
+  const progressPercent = effectiveDuration > 0 ? Math.min(100, Math.max(0, (currentTime / effectiveDuration) * 100)) : 0;
 
   // Mobile Compact Bottom Bar
   if (isMobile) {
@@ -311,8 +312,8 @@ export const StemPlayerBar: React.FC = () => {
           <div
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              const pct = (e.clientX - rect.left) / rect.width;
-              seek(pct * duration);
+              const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+              seek(pct * effectiveDuration);
             }}
             style={{
               flex: 1,
@@ -333,7 +334,7 @@ export const StemPlayerBar: React.FC = () => {
             />
           </div>
           <span style={{ fontSize: 11, color: '#94a3b8', width: 34, fontFamily: 'monospace' }}>
-            {formatTime(duration)}
+            {formatTime(effectiveDuration)}
           </span>
         </div>
       </div>

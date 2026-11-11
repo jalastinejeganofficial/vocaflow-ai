@@ -20,23 +20,43 @@ def send_partial_audio(path: Path, request: Request):
     file_size = stat.st_size
     range_header = request.headers.get("range")
     
-    content_type = "audio/mpeg" if path.suffix.lower() == ".mp3" else "audio/wav"
+    mime_map = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".ogg": "audio/ogg",
+        ".webm": "audio/webm",
+    }
+    content_type = mime_map.get(path.suffix.lower(), "application/octet-stream")
     
     if not range_header:
-        return FileResponse(path, media_type=content_type)
+        return FileResponse(path, media_type=content_type, headers={"Accept-Ranges": "bytes"})
         
     # Range: bytes=start-end
     try:
         bytes_prefix = "bytes="
         if not range_header.startswith(bytes_prefix):
-            return FileResponse(path, media_type=content_type)
+            return FileResponse(path, media_type=content_type, headers={"Accept-Ranges": "bytes"})
             
         range_val = range_header[len(bytes_prefix):].strip()
+        if "," in range_val:
+            range_val = range_val.split(",")[0].strip()
+
         start_str, end_str = range_val.split("-")
-        start = int(start_str) if start_str else 0
-        end = int(end_str) if end_str else file_size - 1
+        if start_str == "" and end_str != "":
+            # Suffix byte range: bytes=-500 (last 500 bytes)
+            suffix_len = int(end_str)
+            start = max(0, file_size - suffix_len)
+            end = file_size - 1
+        else:
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+            if end >= file_size:
+                end = file_size - 1
         
-        if start >= file_size or end >= file_size or start > end:
+        if start >= file_size or start < 0 or start > end:
             raise HTTPException(status_code=416, detail="Requested Range Not Satisfiable")
             
         chunk_size = (end - start) + 1
@@ -46,7 +66,7 @@ def send_partial_audio(path: Path, request: Request):
                 f.seek(start)
                 bytes_left = chunk_size
                 while bytes_left > 0:
-                    read_len = min(64 * 1024, bytes_left)
+                    read_len = min(128 * 1024, bytes_left)
                     data = f.read(read_len)
                     if not data:
                         break
@@ -60,8 +80,10 @@ def send_partial_audio(path: Path, request: Request):
             "Content-Type": content_type
         }
         return StreamingResponse(iterfile(), status_code=206, headers=headers)
-    except Exception as e:
-        return FileResponse(path, media_type=content_type)
+    except HTTPException:
+        raise
+    except Exception:
+        return FileResponse(path, media_type=content_type, headers={"Accept-Ranges": "bytes"})
 
 @router.post("/upload")
 async def upload_audio(file: UploadFile = File(...)):

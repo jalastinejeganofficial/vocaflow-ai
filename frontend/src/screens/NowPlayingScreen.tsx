@@ -57,13 +57,14 @@ export const NowPlayingScreen: React.FC = () => {
   }
 
   const formatTime = (secs: number) => {
-    if (isNaN(secs) || secs < 0) return '0:00';
+    if (!Number.isFinite(secs) || isNaN(secs) || secs < 0) return '0:00';
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const effectiveDuration = duration || currentTrack.duration || 0;
+  const progressPercent = effectiveDuration > 0 ? Math.min(100, Math.max(0, (currentTime / effectiveDuration) * 100)) : 0;
   const speeds = [0.75, 1.0, 1.25, 1.5];
 
   const artworkSize = isMobile ? Math.min(220, window.innerWidth * 0.55) : 280;
@@ -239,8 +240,8 @@ export const NowPlayingScreen: React.FC = () => {
         <div
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
-            const pct = (e.clientX - rect.left) / rect.width;
-            seek(pct * duration);
+            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            seek(pct * effectiveDuration);
           }}
           style={{
             height: 6,
@@ -263,7 +264,7 @@ export const NowPlayingScreen: React.FC = () => {
 
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>
           <span>{formatTime(currentTime)}</span>
-          <span>{formatTime(duration)}</span>
+          <span>{formatTime(effectiveDuration)}</span>
         </div>
       </div>
 

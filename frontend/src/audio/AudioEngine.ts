@@ -31,6 +31,8 @@ export class AudioEngine {
   private masterVolume = 1.0;
   private playbackRate = 1.0;
   private hasInstrumental = false;
+  private loadedOriginalUrl = '';
+  private loadedInstrumentalUrl = '';
   
   // Callbacks
   private onTimeUpdateCallback: ((time: number, duration: number) => void) | null = null;
@@ -45,22 +47,29 @@ export class AudioEngine {
     this.audioA.preload = 'auto';
     this.audioB.preload = 'auto';
 
-    // Hook listeners
+    // Primary Timeline (Deck A)
     this.audioA.addEventListener('timeupdate', () => {
       this.syncTimelines();
-      if (this.onTimeUpdateCallback) {
-        this.onTimeUpdateCallback(this.audioA.currentTime, this.audioA.duration || 0);
-      }
+      this.emitTimeUpdate();
+    });
+
+    this.audioA.addEventListener('loadedmetadata', () => {
+      this.emitTimeUpdate();
+    });
+
+    this.audioA.addEventListener('durationchange', () => {
+      this.emitTimeUpdate();
     });
 
     this.audioA.addEventListener('ended', () => {
       this.isPlaying = false;
+      this.audioB.pause();
       if (this.onStateChangeCallback) this.onStateChangeCallback(false);
       if (this.onEndCallback) this.onEndCallback();
     });
 
     this.audioA.addEventListener('pause', () => {
-      if (!this.audioA.seeking) {
+      if (!this.audioA.seeking && this.audioB.paused) {
         this.isPlaying = false;
         if (this.onStateChangeCallback) this.onStateChangeCallback(false);
       }
@@ -70,6 +79,50 @@ export class AudioEngine {
       this.isPlaying = true;
       if (this.onStateChangeCallback) this.onStateChangeCallback(true);
     });
+
+    this.audioA.addEventListener('error', (e) => {
+      console.error('Deck A audio load error:', this.audioA.error, e);
+    });
+
+    // Fallback & Instrumental Timeline Listeners (Deck B)
+    this.audioB.addEventListener('timeupdate', () => {
+      // If Deck A somehow stalled or had no source while Deck B is playing, still update UI timeline!
+      if (this.audioA.paused && !this.audioB.paused) {
+        if (this.onTimeUpdateCallback) {
+          const durB = Number.isFinite(this.audioB.duration) ? this.audioB.duration : 0;
+          this.onTimeUpdateCallback(this.audioB.currentTime, durB);
+        }
+        // Recover Deck A if it has a valid source
+        if (this.audioA.src && this.audioA.readyState >= 2) {
+          this.audioA.currentTime = this.audioB.currentTime;
+          this.audioA.play().catch(() => {});
+        }
+      }
+    });
+
+    this.audioB.addEventListener('play', () => {
+      if (!this.isPlaying) {
+        this.isPlaying = true;
+        if (this.onStateChangeCallback) this.onStateChangeCallback(true);
+      }
+    });
+
+    this.audioB.addEventListener('ended', () => {
+      if (this.audioA.paused) {
+        this.isPlaying = false;
+        if (this.onStateChangeCallback) this.onStateChangeCallback(false);
+        if (this.onEndCallback) this.onEndCallback();
+      }
+    });
+  }
+
+  private emitTimeUpdate() {
+    if (!this.onTimeUpdateCallback) return;
+    const rawTime = !this.audioA.paused || this.audioB.paused ? this.audioA.currentTime : this.audioB.currentTime;
+    const durA = Number.isFinite(this.audioA.duration) && this.audioA.duration > 0 ? this.audioA.duration : 0;
+    const durB = Number.isFinite(this.audioB.duration) && this.audioB.duration > 0 ? this.audioB.duration : 0;
+    const dur = durA || durB;
+    this.onTimeUpdateCallback(rawTime || 0, dur);
   }
 
   private initAudioContext() {
@@ -101,8 +154,13 @@ export class AudioEngine {
     this.masterGain.connect(this.analyser);
     this.analyser.connect(this.ctx.destination);
 
+    this.masterGain.gain.setValueAtTime(this.masterVolume, this.ctx.currentTime);
     this.updateGains(false);
     this.isInitialized = true;
+  }
+
+  public hasLoadedOriginal(originalUrl: string): boolean {
+    return !!originalUrl && this.loadedOriginalUrl === originalUrl && !!this.audioA.src;
   }
 
   /**
@@ -110,21 +168,33 @@ export class AudioEngine {
    */
   public async loadTrack(originalUrl: string, instrumentalUrl?: string, autoPlay = false) {
     this.initAudioContext();
-    if (this.ctx && this.ctx.state === 'suspended') {
-      await this.ctx.resume();
-    }
 
+    // Pause cleanly before switching sources
+    this.audioA.pause();
+    this.audioB.pause();
+    this.isPlaying = false;
+
+    this.loadedOriginalUrl = originalUrl;
+    this.loadedInstrumentalUrl = instrumentalUrl || '';
     this.hasInstrumental = !!instrumentalUrl;
     
     this.audioA.src = originalUrl;
+    this.audioA.currentTime = 0;
+    this.audioA.playbackRate = this.playbackRate;
     this.audioA.load();
 
     if (instrumentalUrl) {
       this.audioB.src = instrumentalUrl;
+      this.audioB.currentTime = 0;
+      this.audioB.playbackRate = this.playbackRate;
       this.audioB.load();
     } else {
       this.audioB.removeAttribute('src');
+      this.audioB.load();
     }
+
+    // Re-apply gain matrix immediately for the new track/stem state
+    this.updateGains(false);
 
     if (autoPlay) {
       await this.play();
@@ -136,18 +206,41 @@ export class AudioEngine {
    * Called immediately when background vocal separation completes.
    * Links instrumental deck seamlessly without stopping current playback!
    */
-  public attachInstrumental(instrumentalUrl: string) {
-    const currentPos = this.audioA.currentTime;
+  public attachInstrumental(instrumentalUrl: string, originalFallbackUrl?: string) {
+    this.initAudioContext();
+
+    // Ensure Deck A also has the original audio loaded so timeline & normal mode always work
+    if ((!this.audioA.src || !this.loadedOriginalUrl) && originalFallbackUrl) {
+      this.loadedOriginalUrl = originalFallbackUrl;
+      this.audioA.src = originalFallbackUrl;
+      this.audioA.playbackRate = this.playbackRate;
+      this.audioA.load();
+    }
+
+    const currentPos = this.audioA.currentTime || 0;
     const wasPlaying = !this.audioA.paused;
     
     this.hasInstrumental = true;
+    this.loadedInstrumentalUrl = instrumentalUrl;
     this.audioB.src = instrumentalUrl;
-    this.audioB.currentTime = currentPos;
+    this.audioB.playbackRate = this.playbackRate;
+
+    const onReadyB = () => {
+      this.audioB.removeEventListener('canplay', onReadyB);
+      this.audioB.currentTime = this.audioA.currentTime || currentPos;
+      if (!this.audioA.paused) {
+        this.audioB.play().catch(e => console.warn('Deck B sync play notice:', e));
+      }
+    };
+
+    this.audioB.addEventListener('canplay', onReadyB);
     this.audioB.load();
 
     if (wasPlaying) {
-      this.audioB.play().catch(e => console.warn('Deck B sync play notice:', e));
+      this.audioB.play().catch(e => console.warn('Deck B initial play notice:', e));
     }
+
+    this.updateGains(true);
   }
 
   /**
@@ -182,33 +275,36 @@ export class AudioEngine {
     if (!this.gainA || !this.gainB || !this.ctx) return;
 
     const t = this.ctx.currentTime;
-    const fadeDuration = crossfade ? 0.04 : 0.001; // 40ms smooth micro-crossfade
 
-    if (!this.hasInstrumental) {
-      // Fallback: only original track is present
-      this.gainA.gain.setTargetAtTime(1.0, t, fadeDuration);
-      this.gainB.gain.setTargetAtTime(0.0, t, fadeDuration);
-      return;
+    let gainOriginal = 1.0;
+    let gainInstrumental = 0.0;
+
+    if (this.hasInstrumental) {
+      // Equal-power panning law prevents dip in perceived loudness:
+      gainOriginal = Math.sin((this.vocalIntensity * Math.PI) / 2);
+      gainInstrumental = Math.cos((this.vocalIntensity * Math.PI) / 2);
+
+      // Hard mute cutoff for absolute studio silence (0.0000)
+      if (this.vocalIntensity <= 0.02) {
+        gainOriginal = 0.0;
+        gainInstrumental = 1.0;
+      } else if (this.vocalIntensity >= 0.98) {
+        gainOriginal = 1.0;
+        gainInstrumental = 0.0;
+      }
     }
 
-    // When hasInstrumental is true:
-    // Deck A (Original): scaled by vocalIntensity (0.0 to 1.0)
-    // Deck B (Instrumental): scaled by (1.0 - vocalIntensity)
-    // Using equal-power panning law prevents dip in perceived loudness:
-    let gainOriginal = Math.sin((this.vocalIntensity * Math.PI) / 2);
-    let gainInstrumental = Math.cos((this.vocalIntensity * Math.PI) / 2);
+    this.gainA.gain.cancelScheduledValues(t);
+    this.gainB.gain.cancelScheduledValues(t);
 
-    // Hard mute cutoff for absolute studio silence (0.0000)
-    if (this.vocalIntensity <= 0.02) {
-      gainOriginal = 0.0;
-      gainInstrumental = 1.0;
-    } else if (this.vocalIntensity >= 0.98) {
-      gainOriginal = 1.0;
-      gainInstrumental = 0.0;
+    if (crossfade) {
+      const fadeDuration = 0.03; // 30ms smooth micro-crossfade
+      this.gainA.gain.setTargetAtTime(gainOriginal, t, fadeDuration);
+      this.gainB.gain.setTargetAtTime(gainInstrumental, t, fadeDuration);
+    } else {
+      this.gainA.gain.setValueAtTime(gainOriginal, t);
+      this.gainB.gain.setValueAtTime(gainInstrumental, t);
     }
-
-    this.gainA.gain.setTargetAtTime(gainOriginal, t, fadeDuration);
-    this.gainB.gain.setTargetAtTime(gainInstrumental, t, fadeDuration);
   }
 
   /**
@@ -216,9 +312,15 @@ export class AudioEngine {
    */
   private syncTimelines() {
     if (!this.hasInstrumental || this.audioB.readyState < 2) return;
+
+    if (!this.audioA.paused && this.audioB.paused) {
+      this.audioB.currentTime = this.audioA.currentTime;
+      this.audioB.play().catch(() => {});
+      return;
+    }
     
     const diff = Math.abs(this.audioA.currentTime - this.audioB.currentTime);
-    if (diff > 0.04) {
+    if (diff > 0.08 && !this.audioB.seeking) {
       // Resynchronize Deck B to Deck A
       this.audioB.currentTime = this.audioA.currentTime;
     }
@@ -227,25 +329,45 @@ export class AudioEngine {
   public async play() {
     this.initAudioContext();
     if (this.ctx && this.ctx.state === 'suspended') {
-      await this.ctx.resume();
+      try {
+        await this.ctx.resume();
+      } catch (e) {
+        console.warn('AudioContext resume notice:', e);
+      }
     }
 
+    this.updateGains(false);
+
     try {
-      const p1 = this.audioA.play();
+      const hasA = !!this.audioA.src;
+      const hasB = this.hasInstrumental && !!this.audioB.src;
+
+      if (!hasA && !hasB) {
+        console.warn('No audio source loaded on Deck A or Deck B');
+        return;
+      }
+
+      const p1 = hasA ? this.audioA.play() : Promise.resolve();
       let p2: Promise<void> | null = null;
       
-      if (this.hasInstrumental && this.audioB.src) {
-        this.audioB.currentTime = this.audioA.currentTime;
+      if (hasB) {
+        if (hasA) {
+          this.audioB.currentTime = this.audioA.currentTime;
+        }
         p2 = this.audioB.play();
       }
 
       await p1;
-      if (p2) await p2;
+      if (p2) {
+        await p2.catch(e => console.warn('Deck B play notice:', e));
+      }
       
       this.isPlaying = true;
       if (this.onStateChangeCallback) this.onStateChangeCallback(true);
     } catch (err) {
       console.error('Audio play error:', err);
+      this.isPlaying = false;
+      if (this.onStateChangeCallback) this.onStateChangeCallback(false);
     }
   }
 
@@ -257,10 +379,14 @@ export class AudioEngine {
   }
 
   public seek(seconds: number) {
-    this.audioA.currentTime = seconds;
-    if (this.hasInstrumental && this.audioB.src) {
+    if (!Number.isFinite(seconds) || seconds < 0) return;
+    if (this.audioA.src && this.audioA.readyState >= 1) {
+      this.audioA.currentTime = seconds;
+    }
+    if (this.hasInstrumental && this.audioB.src && this.audioB.readyState >= 1) {
       this.audioB.currentTime = seconds;
     }
+    this.emitTimeUpdate();
   }
 
   public setVolume(vol: number) {
@@ -284,11 +410,13 @@ export class AudioEngine {
   }
 
   public getCurrentTime(): number {
-    return this.audioA.currentTime;
+    return this.audioA.currentTime || this.audioB.currentTime || 0;
   }
 
   public getDuration(): number {
-    return this.audioA.duration || 0;
+    const durA = Number.isFinite(this.audioA.duration) ? this.audioA.duration : 0;
+    const durB = Number.isFinite(this.audioB.duration) ? this.audioB.duration : 0;
+    return durA || durB;
   }
 
   public getMode(): AudioMode {
@@ -317,4 +445,3 @@ export class AudioEngine {
 }
 
 export const globalAudioEngine = new AudioEngine();
-
