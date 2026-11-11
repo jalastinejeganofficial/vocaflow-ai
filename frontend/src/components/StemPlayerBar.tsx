@@ -29,6 +29,7 @@ export const StemPlayerBar: React.FC = () => {
     vocalIntensity,
     isSeparating,
     separationProgress,
+    isProcessingUpload,
     togglePlay,
     seek,
     setVolume,
@@ -42,7 +43,7 @@ export const StemPlayerBar: React.FC = () => {
 
   const isMobile = useIsMobile();
 
-  if (!currentTrack) return null;
+  if (!currentTrack || isProcessingUpload) return null;
 
   const formatTime = (secs: number) => {
     if (!Number.isFinite(secs) || isNaN(secs) || secs < 0) return '0:00';

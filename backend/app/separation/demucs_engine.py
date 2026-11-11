@@ -33,11 +33,11 @@ class DemucsEngine:
         # If fast quality requested, use optimized spectral separator immediately
         if quality.lower() == "fast":
             if progress_callback:
-                progress_callback(10.0, "Starting fast spectral separation...")
+                progress_callback(15.0, "Decoding audio & building stereo spectrum...")
             success = fast_spectral_separation(input_audio_path, vocal_target, inst_target)
             if success:
                 if progress_callback:
-                    progress_callback(100.0, "Fast separation completed.")
+                    progress_callback(100.0, "AI Vocal Removal completed.")
                 return {"vocal": vocal_target, "instrumental": inst_target}
             else:
                 raise RuntimeError("Fast spectral separation failed.")
@@ -72,27 +72,38 @@ class DemucsEngine:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            bufsize=0,
             env=env
         )
         
         percent_pattern = re.compile(r"(\d+)%\|")
         
         try:
-            for line in process.stdout:
+            buf = bytearray()
+            while True:
                 if cancel_check and cancel_check():
                     process.terminate()
                     raise RuntimeError("Separation job was cancelled by user.")
-                    
-                line_str = line.strip()
-                match = percent_pattern.search(line_str)
-                if match:
-                    raw_pct = float(match.group(1))
-                    # Map demucs 0-100% to overall 10%-95%
-                    mapped_progress = 10.0 + (raw_pct * 0.85)
-                    if progress_callback:
-                        progress_callback(mapped_progress, f"Separating audio stems: {int(raw_pct)}%")
+
+                chunk = process.stdout.read(1)
+                if not chunk:
+                    break
+                if chunk in (b"\r", b"\n"):
+                    line_str = buf.decode("utf-8", errors="ignore").strip()
+                    buf.clear()
+                    if line_str:
+                        match = percent_pattern.search(line_str)
+                        if match:
+                            raw_pct = float(match.group(1))
+                            # Map demucs 0-100% to overall 10%-95%
+                            mapped_progress = 10.0 + (raw_pct * 0.85)
+                            if progress_callback:
+                                progress_callback(mapped_progress, f"AI Removing Vocals: {int(raw_pct)}%")
+                        elif "Separated tracks" in line_str or "Saving" in line_str:
+                            if progress_callback:
+                                progress_callback(96.0, "Finalizing pristine instrumental & vocal stems...")
+                else:
+                    buf.extend(chunk)
                         
             process.wait()
             

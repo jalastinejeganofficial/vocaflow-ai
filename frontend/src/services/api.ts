@@ -4,7 +4,12 @@ export const getApiBase = (): string => {
   if (typeof window === 'undefined') return '/api';
 
   // Direct desktop application or localhost backend hosting
-  if ((window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') && window.location.port === '8000') {
+  if (
+    (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') &&
+    window.location.port !== '' &&
+    window.location.port !== '5173' &&
+    window.location.port !== '3000'
+  ) {
     return '/api';
   }
 
@@ -36,10 +41,10 @@ export const api = {
     return res.json();
   },
 
-  uploadAudio: async (file: File): Promise<Track> => {
+  uploadAudio: async (file: File, autoSeparate = true): Promise<Track> => {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch(`${getApiBase()}/audio/upload`, {
+    const res = await fetch(`${getApiBase()}/audio/upload?auto_separate=${autoSeparate}`, {
       method: 'POST',
       body: formData,
     });
@@ -82,6 +87,12 @@ export const api = {
   getSeparationResult: async (jobId: string): Promise<any> => {
     const res = await fetch(`${getApiBase()}/separation/result/${jobId}`);
     if (!res.ok) throw new Error('Failed to fetch separation result');
+    return res.json();
+  },
+
+  cancelSeparation: async (jobId: string): Promise<{ job_id: string; cancelled: boolean }> => {
+    const res = await fetch(`${getApiBase()}/separation/${jobId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed to cancel separation');
     return res.json();
   },
 

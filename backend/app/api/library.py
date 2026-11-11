@@ -10,10 +10,13 @@ router = APIRouter(prefix="/api/library", tags=["Library"])
 async def get_library(
     search: Optional[str] = None,
     filter_type: Optional[str] = "all", # all, ready, separating, favorites
-    sort_by: Optional[str] = "created_at" # created_at, title, artist, duration
+    sort_by: Optional[str] = "created_at", # created_at, title, artist, duration
+    include_processing: bool = False
 ):
     """Retrieve music library with search, filtering, and sorting."""
     query = "SELECT * FROM tracks WHERE 1=1"
+    if not include_processing:
+        query += " AND (status = 'ready' OR has_stems = 1)"
     params = []
     
     if search:

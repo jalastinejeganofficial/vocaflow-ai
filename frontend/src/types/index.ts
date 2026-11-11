@@ -15,6 +15,7 @@ export interface Track {
   channels: number;
   has_stems: boolean;
   status: string;
+  job_id?: string;
   play_count: number;
   is_favorite: boolean;
   created_at?: string;
@@ -46,7 +47,26 @@ export interface SeparationStatus {
   progress: number;
   quality: string;
   model: string;
+  message?: string;
+  elapsed_seconds?: number;
+  estimated_remaining_seconds?: number | null;
   error_message?: string;
+}
+
+export interface PendingUploadJob {
+  localId: string;
+  jobId: string;
+  trackId: string;
+  title: string;
+  artist: string;
+  duration: number;
+  progress: number;
+  status: 'uploading' | 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
+  message: string;
+  startedAtMs: number;
+  elapsedSeconds: number;
+  estimatedRemainingSeconds: number | null;
+  errorMessage?: string;
 }
 
 export interface VoiceEffects {

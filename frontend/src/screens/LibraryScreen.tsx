@@ -14,7 +14,7 @@ import { useIsMobile } from '../hooks/useIsMobile';
 import { api, getApiBase } from '../services/api';
 
 export const LibraryScreen: React.FC = () => {
-  const { tracks, currentTrack, isPlaying, selectTrack, playTrack, loadLibrary } = usePlayerStore();
+  const { tracks, currentTrack, readyNotificationTrackId, startUploadPipeline, playTrack, loadLibrary } = usePlayerStore();
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'ready' | 'favorites'>('all');
   const [isUploading, setIsUploading] = useState(false);
@@ -26,20 +26,7 @@ export const LibraryScreen: React.FC = () => {
 
     setIsUploading(true);
     try {
-      let lastUploaded: any = null;
-      for (let i = 0; i < files.length; i++) {
-        lastUploaded = await api.uploadAudio(files[i]);
-      }
-      await loadLibrary();
-
-      // If nothing is currently playing, select & preload the newly uploaded track
-      if (lastUploaded && !isPlaying) {
-        const latestTracks = usePlayerStore.getState().tracks;
-        const match = latestTracks.find((t) => t.id === lastUploaded.id) || latestTracks[0];
-        if (match) {
-          await selectTrack(match, false);
-        }
-      }
+      await startUploadPipeline(files);
     } catch (err: any) {
       alert(`Upload failed: ${err.message}`);
     } finally {
@@ -186,6 +173,7 @@ export const LibraryScreen: React.FC = () => {
       <div style={{ background: '#12151e', borderRadius: 16, border: '1px solid rgba(255,255,255,0.06)', overflow: 'hidden' }}>
         {displayTracks.map((t, idx) => {
           const isCurrent = currentTrack?.id === t.id;
+          const isNewlyReady = readyNotificationTrackId === t.id;
           return (
             <div
               key={t.id}
@@ -197,7 +185,12 @@ export const LibraryScreen: React.FC = () => {
                 padding: '12px 14px',
                 borderBottom: '1px solid rgba(255,255,255,0.03)',
                 cursor: 'pointer',
-                background: isCurrent ? 'rgba(0, 229, 153, 0.07)' : 'transparent',
+                background: isCurrent
+                  ? 'rgba(0, 229, 153, 0.08)'
+                  : isNewlyReady
+                  ? 'rgba(0, 229, 153, 0.12)'
+                  : 'transparent',
+                borderLeft: isNewlyReady ? '3px solid #00e599' : '3px solid transparent',
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, overflow: 'hidden' }}>
@@ -211,7 +204,7 @@ export const LibraryScreen: React.FC = () => {
                   )}
                 </div>
                 <div style={{ overflow: 'hidden' }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: isCurrent ? '#00e599' : '#f8fafc', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: isCurrent || isNewlyReady ? '#00e599' : '#f8fafc', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {t.title}
                   </div>
                   <div style={{ fontSize: 12, color: '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -221,7 +214,25 @@ export const LibraryScreen: React.FC = () => {
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-                {t.has_stems && (
+                {isNewlyReady && (
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      fontSize: 10,
+                      fontWeight: 800,
+                      padding: '4px 10px',
+                      borderRadius: 12,
+                      background: '#00e599',
+                      color: '#08090c',
+                    }}
+                  >
+                    <Play size={10} fill="#08090c" /> READY — CLICK TO PLAY
+                  </span>
+                )}
+
+                {t.has_stems && !isNewlyReady && (
                   <span
                     style={{
                       fontSize: 9,

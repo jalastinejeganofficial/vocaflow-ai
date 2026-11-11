@@ -35,6 +35,9 @@ async def get_separation_status(job_id: str):
         progress=float(info["progress"]),
         quality=info["quality"],
         model=info["model"],
+        message=info.get("message"),
+        elapsed_seconds=info.get("elapsed_seconds"),
+        estimated_remaining_seconds=info.get("estimated_remaining_seconds"),
         error_message=info.get("error_message"),
         started_at=str(info.get("started_at")),
         completed_at=str(info.get("completed_at"))

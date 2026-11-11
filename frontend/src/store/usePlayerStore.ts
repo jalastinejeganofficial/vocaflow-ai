@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Track } from '../types';
+import { Track, PendingUploadJob } from '../types';
 import { globalAudioEngine } from '../audio/AudioEngine';
 import { api, resolveUrl } from '../services/api';
 
@@ -33,9 +33,14 @@ interface PlayerState {
   isSeparating: boolean;
   separationMessage: string;
 
+  // Upload & Auto AI Remover Pipeline
+  uploadJobs: PendingUploadJob[];
+  isProcessingUpload: boolean;
+  readyNotificationTrackId: string | null;
+
   // Actions
   setScreen: (screen: ScreenType) => void;
-  loadLibrary: () => Promise<void>;
+  loadLibrary: (skipAutoSelect?: boolean) => Promise<void>;
   selectTrack: (track: Track, autoPlay?: boolean) => Promise<void>;
   playTrack: (track: Track) => Promise<void>;
   togglePlay: () => Promise<void>;
@@ -49,6 +54,10 @@ interface PlayerState {
   toggleSingMode: () => Promise<void>;
   setVocalIntensity: (intensity: number) => void;
   pollSeparation: (jobId: string, trackId: string) => void;
+  startUploadPipeline: (files: FileList) => Promise<void>;
+  cancelUploadJob: (localId: string) => Promise<void>;
+  dismissUploadJob: (localId: string) => void;
+  clearReadyNotification: () => void;
 }
 
 const getTrackUrls = (track: Track) => {
@@ -60,6 +69,9 @@ const getTrackUrls = (track: Track) => {
     : undefined;
   return { streamUrl, instUrl };
 };
+
+let uploadTickerInterval: ReturnType<typeof setInterval> | null = null;
+let uploadPollInterval: ReturnType<typeof setInterval> | null = null;
 
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Bind Audio Engine updates
@@ -86,6 +98,113 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
   });
 
+  const stopUploadTimersIfIdle = () => {
+    const active = get().uploadJobs.some((j) =>
+      j.status === 'uploading' || j.status === 'queued' || j.status === 'processing'
+    );
+    if (!active) {
+      if (uploadTickerInterval) {
+        clearInterval(uploadTickerInterval);
+        uploadTickerInterval = null;
+      }
+      if (uploadPollInterval) {
+        clearInterval(uploadPollInterval);
+        uploadPollInterval = null;
+      }
+      set({ isProcessingUpload: false });
+    }
+  };
+
+  const ensureUploadTimersRunning = () => {
+    if (!uploadTickerInterval) {
+      uploadTickerInterval = setInterval(() => {
+        const now = Date.now();
+        set((state) => ({
+          uploadJobs: state.uploadJobs.map((j) => {
+            if (j.status === 'uploading' || j.status === 'queued' || j.status === 'processing') {
+              const elapsed = Math.floor((now - j.startedAtMs) / 1000);
+              return { ...j, elapsedSeconds: elapsed };
+            }
+            return j;
+          }),
+        }));
+      }, 500);
+    }
+
+    if (!uploadPollInterval) {
+      uploadPollInterval = setInterval(async () => {
+        const currentJobs = get().uploadJobs.filter(
+          (j) => (j.status === 'queued' || j.status === 'processing') && !!j.jobId
+        );
+        if (currentJobs.length === 0) {
+          stopUploadTimersIfIdle();
+          return;
+        }
+
+        for (const job of currentJobs) {
+          try {
+            const st = await api.getSeparationStatus(job.jobId);
+            if (st.status === 'completed') {
+              // Reload library WITHOUT auto-selecting into player so user clicks to play!
+              await get().loadLibrary(true);
+
+              set((state) => ({
+                readyNotificationTrackId: job.trackId,
+                uploadJobs: state.uploadJobs.map((j) =>
+                  j.localId === job.localId
+                    ? {
+                        ...j,
+                        status: 'completed',
+                        progress: 100,
+                        message: 'AI Vocal Removal Complete! Ready to Play.',
+                        estimatedRemainingSeconds: 0,
+                      }
+                    : j
+                ),
+              }));
+
+              stopUploadTimersIfIdle();
+            } else if (st.status === 'failed' || st.status === 'cancelled') {
+              set((state) => ({
+                uploadJobs: state.uploadJobs.map((j) =>
+                  j.localId === job.localId
+                    ? {
+                        ...j,
+                        status: st.status,
+                        errorMessage: st.error_message || 'Vocal separation failed',
+                        message: st.error_message || 'Separation failed',
+                        estimatedRemainingSeconds: null,
+                      }
+                    : j
+                ),
+              }));
+              stopUploadTimersIfIdle();
+            } else {
+              set((state) => ({
+                uploadJobs: state.uploadJobs.map((j) =>
+                  j.localId === job.localId
+                    ? {
+                        ...j,
+                        status: st.status,
+                        progress: st.progress,
+                        message: st.message || `Removing vocals: ${Math.round(st.progress)}%`,
+                        estimatedRemainingSeconds:
+                          st.estimated_remaining_seconds !== undefined
+                            ? st.estimated_remaining_seconds
+                            : j.estimatedRemainingSeconds,
+                      }
+                    : j
+                ),
+              }));
+            }
+          } catch (err) {
+            console.warn('Upload separation poll error:', err);
+          }
+        }
+      }, 1000);
+    }
+  };
+
   return {
     currentScreen: 'home',
     tracks: [],
@@ -105,15 +224,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     isSeparating: false,
     separationMessage: '',
 
+    uploadJobs: [],
+    isProcessingUpload: false,
+    readyNotificationTrackId: null,
+
     setScreen: (screen) => set({ currentScreen: screen }),
 
-    loadLibrary: async () => {
+    loadLibrary: async (skipAutoSelect = false) => {
       try {
         const tracks = await api.getLibrary();
         set({ tracks });
 
         const current = get().currentTrack;
-        if (!current && tracks.length > 0) {
+        if (!skipAutoSelect && !get().isProcessingUpload && !current && tracks.length > 0) {
           const firstTrack = tracks[0];
           const { streamUrl, instUrl } = getTrackUrls(firstTrack);
           set({
@@ -123,7 +246,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           });
           await globalAudioEngine.loadTrack(streamUrl, instUrl, false);
         } else if (current) {
-          // Refresh current track metadata if updated (e.g. stems generated)
+          // Refresh current track metadata if updated
           const updated = tracks.find((t) => t.id === current.id);
           if (updated) {
             set({ currentTrack: updated });
@@ -149,6 +272,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     playTrack: async (track) => {
+      // Clear any completed upload notifications/cards when user clicks a song to play
+      set((state) => ({
+        readyNotificationTrackId: state.readyNotificationTrackId === track.id ? null : state.readyNotificationTrackId,
+        uploadJobs: state.uploadJobs.filter((j) => j.status !== 'completed'),
+      }));
       await get().selectTrack(track, true);
       api.recordHistory(track.id, 100, 'normal').catch(() => {});
     },
@@ -163,7 +291,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       const { streamUrl, instUrl } = getTrackUrls(currentTrack);
 
-      // If Deck A wasn't loaded yet (e.g. right after upload or startup), load it cleanly while preserving Sing Mode!
       if (!globalAudioEngine.hasLoadedOriginal(streamUrl)) {
         await globalAudioEngine.loadTrack(streamUrl, instUrl, false);
         globalAudioEngine.setVocalIntensity(isSingMode ? vocalIntensity : 1.0);
@@ -245,14 +372,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const nextState = !isSingMode;
       const { streamUrl, instUrl } = getTrackUrls(currentTrack);
 
-      // Check whether instrumental has already been generated
       if (currentTrack.has_stems || globalAudioEngine.getHasInstrumental()) {
-        // Ensure both Deck A and Deck B are loaded before toggling!
         if (!globalAudioEngine.hasLoadedOriginal(streamUrl)) {
           await globalAudioEngine.loadTrack(streamUrl, instUrl || resolveUrl(`/api/audio/stems/${currentTrack.id}/instrumental`), isPlaying);
         }
 
-        // Instant seamless switch at same timestamp!
         globalAudioEngine.setSingMode(nextState);
         set({ 
           isSingMode: nextState, 
@@ -262,12 +386,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           api.recordHistory(currentTrack.id, 100, 'sing_mode').catch(() => {});
         }
       } else {
-        // Ensure Deck A has the original audio loaded while separating
         if (!globalAudioEngine.hasLoadedOriginal(streamUrl)) {
           await globalAudioEngine.loadTrack(streamUrl, undefined, false);
         }
 
-        // Stems not generated yet: start AI vocal separation!
         set({ isSingMode: true, isSeparating: true, separationMessage: 'AI Vocal Separation started...' });
         try {
           const res = await api.startSeparation(currentTrack.id, 'balanced', 'htdemucs');
@@ -293,7 +415,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           const status = await api.getSeparationStatus(jobId);
           set({ 
             separationProgress: status.progress,
-            separationMessage: `Separating stems: ${Math.round(status.progress)}%` 
+            separationMessage: status.message || `Separating stems: ${Math.round(status.progress)}%` 
           });
 
           if (status.status === 'completed') {
@@ -304,13 +426,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
               ? getTrackUrls(current).streamUrl
               : resolveUrl(`/api/audio/stream/${trackId}`);
 
-            // Attach generated instrumental to Deck B without pausing playback!
             if (result.instrumental_url) {
               globalAudioEngine.attachInstrumental(resolveUrl(result.instrumental_url), fallbackStreamUrl);
               globalAudioEngine.setSingMode(true);
             }
 
-            // Update track in store
             set((state) => ({
               isSeparating: false,
               isSingMode: true,
@@ -339,5 +459,125 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }
       }, 1000);
     },
+
+    startUploadPipeline: async (files) => {
+      // Pause playback & clear active player bar ("no player" while AI remover runs)
+      globalAudioEngine.pause();
+      set({
+        currentTrack: null,
+        isPlaying: false,
+        currentTime: 0,
+        duration: 0,
+        isProcessingUpload: true,
+        readyNotificationTrackId: null,
+      });
+
+      const fileArray = Array.from(files);
+      for (const file of fileArray) {
+        const localId = `up-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const rawTitle = file.name.replace(/\.[^/.]+$/, '');
+        const newJob: PendingUploadJob = {
+          localId,
+          jobId: '',
+          trackId: '',
+          title: rawTitle,
+          artist: 'Analyzing audio...',
+          duration: 0,
+          progress: 2,
+          status: 'uploading',
+          message: 'Uploading song & analyzing audio file...',
+          startedAtMs: Date.now(),
+          elapsedSeconds: 0,
+          estimatedRemainingSeconds: null,
+        };
+
+        set((state) => ({
+          uploadJobs: [newJob, ...state.uploadJobs.filter((j) => j.status !== 'completed')],
+        }));
+        ensureUploadTimersRunning();
+
+        try {
+          const uploaded = await api.uploadAudio(file, true);
+
+          if (uploaded.status === 'ready' || uploaded.has_stems) {
+            await get().loadLibrary(true);
+            set((state) => ({
+              readyNotificationTrackId: uploaded.id,
+              uploadJobs: state.uploadJobs.map((j) =>
+                j.localId === localId
+                  ? {
+                      ...j,
+                      trackId: uploaded.id,
+                      title: uploaded.title || rawTitle,
+                      artist: uploaded.artist || 'Unknown Artist',
+                      duration: uploaded.duration || 0,
+                      status: 'completed',
+                      progress: 100,
+                      message: 'AI Vocal Removal Complete! Ready to Play.',
+                      estimatedRemainingSeconds: 0,
+                    }
+                  : j
+              ),
+            }));
+            stopUploadTimersIfIdle();
+          } else {
+            set((state) => ({
+              uploadJobs: state.uploadJobs.map((j) =>
+                j.localId === localId
+                  ? {
+                      ...j,
+                      jobId: uploaded.job_id || '',
+                      trackId: uploaded.id,
+                      title: uploaded.title || rawTitle,
+                      artist: uploaded.artist || 'Unknown Artist',
+                      duration: uploaded.duration || 0,
+                      status: 'processing',
+                      progress: 5,
+                      message: 'AI Vocal Remover started...',
+                    }
+                  : j
+              ),
+            }));
+            ensureUploadTimersRunning();
+          }
+        } catch (err: any) {
+          set((state) => ({
+            uploadJobs: state.uploadJobs.map((j) =>
+              j.localId === localId
+                ? {
+                    ...j,
+                    status: 'failed',
+                    errorMessage: err.message || 'Upload failed',
+                    message: `Failed: ${err.message}`,
+                  }
+                : j
+            ),
+          }));
+          stopUploadTimersIfIdle();
+        }
+      }
+    },
+
+    cancelUploadJob: async (localId) => {
+      const job = get().uploadJobs.find((j) => j.localId === localId);
+      if (job && job.jobId) {
+        try {
+          await api.cancelSeparation(job.jobId);
+        } catch {}
+      }
+      set((state) => ({
+        uploadJobs: state.uploadJobs.filter((j) => j.localId !== localId),
+      }));
+      stopUploadTimersIfIdle();
+    },
+
+    dismissUploadJob: (localId) => {
+      set((state) => ({
+        uploadJobs: state.uploadJobs.filter((j) => j.localId !== localId),
+      }));
+      stopUploadTimersIfIdle();
+    },
+
+    clearReadyNotification: () => set({ readyNotificationTrackId: null }),
   };
 });

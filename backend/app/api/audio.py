@@ -2,10 +2,12 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Request
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, Request, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from app.config import settings
 from app.services.audio_service import AudioService
+from app.services.separation_service import SeparationService
 from app.storage.file_storage import FileStorage
 from app.database import get_db
 
@@ -86,8 +88,13 @@ def send_partial_audio(path: Path, request: Request):
         return FileResponse(path, media_type=content_type, headers={"Accept-Ranges": "bytes"})
 
 @router.post("/upload")
-async def upload_audio(file: UploadFile = File(...)):
-    """Upload audio file (MP3, WAV, FLAC, M4A) and index into library."""
+async def upload_audio(
+    file: UploadFile = File(...),
+    auto_separate: bool = Query(True),
+    quality: Optional[str] = Query(None),
+    model: Optional[str] = Query(None)
+):
+    """Upload audio file (MP3, WAV, FLAC, M4A) and optionally auto-start AI vocal separation."""
     suffix = Path(file.filename).suffix.lower()
     if suffix not in [".mp3", ".wav", ".flac", ".m4a"]:
         raise HTTPException(status_code=400, detail="Unsupported audio format. Use MP3, WAV, FLAC, or M4A.")
@@ -97,7 +104,27 @@ async def upload_audio(file: UploadFile = File(...)):
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        registered = AudioService.register_audio_file(temp_path, custom_title=Path(file.filename).stem)
+        registered = AudioService.register_audio_file(
+            temp_path,
+            custom_title=Path(file.filename).stem,
+            initial_status="processing" if auto_separate else "ready"
+        )
+
+        if auto_separate and not registered.get("has_stems"):
+            # Read user's preferred separation settings from DB
+            with get_db() as db:
+                rows = db.execute("SELECT key, value FROM settings").fetchall()
+                cfg = {r["key"]: r["value"] for r in rows}
+            use_quality = quality or cfg.get("separation_quality", settings.DEFAULT_QUALITY)
+            use_model = model or cfg.get("separation_model", settings.DEFAULT_DEMUCS_MODEL)
+
+            job_id = SeparationService.start_job(
+                track_id=registered["id"],
+                quality=use_quality,
+                model=use_model
+            )
+            registered["job_id"] = job_id
+
         return registered
     finally:
         if temp_path.exists():

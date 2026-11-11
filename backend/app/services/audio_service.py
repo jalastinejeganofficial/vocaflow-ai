@@ -81,7 +81,12 @@ class AudioService:
             return False
 
     @classmethod
-    def register_audio_file(cls, source_file: Path, custom_title: Optional[str] = None) -> Dict[str, Any]:
+    def register_audio_file(
+        cls,
+        source_file: Path,
+        custom_title: Optional[str] = None,
+        initial_status: str = "ready"
+    ) -> Dict[str, Any]:
         """Copies or imports audio into VocaFlow storage and indexes into DB."""
         meta = cls.inspect_audio(source_file)
         track_id = str(uuid.uuid4())[:8]
@@ -103,6 +108,7 @@ class AudioService:
         vocal_p = FileStorage.get_vocal_path(track_id)
         inst_p = FileStorage.get_instrumental_path(track_id)
         has_stems = 1 if (vocal_p.exists() and inst_p.exists()) else 0
+        final_status = "ready" if has_stems else initial_status
         
         with get_db() as db:
             db.execute("""
@@ -117,7 +123,7 @@ class AudioService:
                 has_stems,
                 str(vocal_p) if has_stems else None,
                 str(inst_p) if has_stems else None,
-                "ready"
+                final_status
             ))
             db.commit()
             
@@ -129,6 +135,7 @@ class AudioService:
             "duration": duration,
             "format": meta["format"],
             "has_stems": bool(has_stems),
+            "status": final_status,
             "artwork_path": artwork_path_str
         }
 

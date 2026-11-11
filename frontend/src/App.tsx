@@ -3,6 +3,7 @@ import { usePlayerStore } from './store/usePlayerStore';
 import { useIsMobile } from './hooks/useIsMobile';
 import { Navbar } from './components/Navbar';
 import { StemPlayerBar } from './components/StemPlayerBar';
+import { UploadProcessingPanel } from './components/UploadProcessingPanel';
 
 import { WelcomeScreen } from './screens/WelcomeScreen';
 import { HomeScreen } from './screens/HomeScreen';
@@ -14,7 +15,7 @@ import { ReportScreen } from './screens/ReportScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 
 export const App: React.FC = () => {
-  const { currentScreen, loadLibrary } = usePlayerStore();
+  const { currentScreen, loadLibrary, uploadJobs } = usePlayerStore();
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -70,6 +71,11 @@ export const App: React.FC = () => {
           WebkitOverflowScrolling: 'touch',
         }}
       >
+        {uploadJobs.length > 0 && (
+          <div style={{ maxWidth: 1100, margin: '0 auto', padding: isMobile ? '14px 16px 0' : '24px 24px 0' }}>
+            <UploadProcessingPanel />
+          </div>
+        )}
         {renderScreen()}
       </main>
 
